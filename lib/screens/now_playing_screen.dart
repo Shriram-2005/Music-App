@@ -179,8 +179,18 @@ class _NowPlayingScreenState extends State<NowPlayingScreen> {
     }
 
     String imageUrl = '';
-    if (currentSong['image'] != null && currentSong['image'].isNotEmpty) {
-      imageUrl = currentSong['image'].last['url']; // high res
+    final rawImg = currentSong['image'];
+    if (rawImg is String) {
+      imageUrl = rawImg;
+    } else if (rawImg is List && rawImg.isNotEmpty) {
+      try {
+        final last = rawImg.last;
+        if (last is Map && last['url'] != null) {
+          imageUrl = last['url'].toString();
+        } else if (last is String) {
+          imageUrl = last;
+        }
+      } catch (_) {}
     }
 
     final isLiked = libraryProvider.isLiked(currentSong['id'].toString());
@@ -213,14 +223,17 @@ class _NowPlayingScreenState extends State<NowPlayingScreen> {
       body: Stack(
         children: [
           // Background blurry image
-          Container(
-            decoration: BoxDecoration(
-              image: DecorationImage(
-                image: CachedNetworkImageProvider(imageUrl),
-                fit: BoxFit.cover,
+          if (imageUrl.isNotEmpty)
+            Container(
+              decoration: BoxDecoration(
+                image: DecorationImage(
+                  image: CachedNetworkImageProvider(imageUrl),
+                  fit: BoxFit.cover,
+                ),
               ),
-            ),
-          ),
+            )
+          else
+            Container(color: Colors.black),
           // Blur filter
           BackdropFilter(
             filter: ImageFilter.blur(sigmaX: 50, sigmaY: 50),

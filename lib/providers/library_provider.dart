@@ -4,12 +4,10 @@ import 'package:dio/dio.dart';
 import 'package:path_provider/path_provider.dart';
 import '../services/db_helper.dart';
 import '../services/api_service.dart';
-import '../services/firebase_sync_service.dart';
 
 class LibraryProvider extends ChangeNotifier {
   DbHelper? _dbHelper;
   String? _userId;
-  FirebaseSyncService? _syncService;
   
   List<dynamic> _likedSongs = [];
   List<Map<String, dynamic>> _playlists = [];
@@ -23,7 +21,6 @@ class LibraryProvider extends ChangeNotifier {
   LibraryProvider(this._userId) {
     if (_userId != null) {
       _dbHelper = DbHelper(userId: _userId!);
-      _syncService = FirebaseSyncService(userId: _userId!, dbHelper: _dbHelper!);
       loadLibrary();
     }
   }
@@ -33,14 +30,12 @@ class LibraryProvider extends ChangeNotifier {
       _userId = newUserId;
       if (_userId != null) {
         _dbHelper = DbHelper(userId: _userId!);
-        _syncService = FirebaseSyncService(userId: _userId!, dbHelper: _dbHelper!);
         loadLibrary();
       } else {
         _likedSongs = [];
         _playlists = [];
         _downloadedSongs = [];
         _dbHelper = null;
-        _syncService = null;
         notifyListeners();
       }
     }
@@ -48,10 +43,6 @@ class LibraryProvider extends ChangeNotifier {
 
   Future<void> loadLibrary() async {
     if (_dbHelper == null) return;
-    
-    if (_syncService != null) {
-      await _syncService!.syncDown();
-    }
 
     _likedSongs = await _dbHelper!.getLikedSongs();
     _playlists = await _dbHelper!.getPlaylists();
@@ -68,15 +59,14 @@ class LibraryProvider extends ChangeNotifier {
     await _dbHelper!.toggleLikedSong(song);
     _likedSongs = await _dbHelper!.getLikedSongs();
     notifyListeners();
-    _syncService?.syncUp();
   }
 
-  Future<void> createPlaylist(String name) async {
-    if (_dbHelper == null) return;
-    await _dbHelper!.createPlaylist(name);
+  Future<String?> createPlaylist(String name) async {
+    if (_dbHelper == null) return null;
+    final id = await _dbHelper!.createPlaylist(name);
     _playlists = await _dbHelper!.getPlaylists();
     notifyListeners();
-    _syncService?.syncUp();
+    return id;
   }
 
   Future<void> renamePlaylist(String id, String newName) async {
@@ -84,7 +74,6 @@ class LibraryProvider extends ChangeNotifier {
     await _dbHelper!.renamePlaylist(id, newName);
     _playlists = await _dbHelper!.getPlaylists();
     notifyListeners();
-    _syncService?.syncUp();
   }
 
   Future<void> deletePlaylist(String id) async {
@@ -92,28 +81,40 @@ class LibraryProvider extends ChangeNotifier {
     await _dbHelper!.deletePlaylist(id);
     _playlists = await _dbHelper!.getPlaylists();
     notifyListeners();
-    _syncService?.syncUp();
+  }
+
+  Future<void> reorderPlaylists(int oldIndex, int newIndex) async {
+    if (_dbHelper == null) return;
+    if (newIndex > oldIndex) {
+      newIndex -= 1;
+    }
+    final item = _playlists.removeAt(oldIndex);
+    _playlists.insert(newIndex, item);
+    notifyListeners();
+
+    final orderedIds = _playlists.map((p) => p['id'].toString()).toList();
+    await _dbHelper!.reorderPlaylists(orderedIds);
   }
 
   Future<void> addSongToPlaylist(String playlistId, dynamic song) async {
     if (_dbHelper == null) return;
     await _dbHelper!.addSongToPlaylist(playlistId, song);
+    _playlists = await _dbHelper!.getPlaylists();
     notifyListeners();
-    _syncService?.syncUp();
   }
 
   Future<void> removeSongFromPlaylist(String playlistId, String songId) async {
     if (_dbHelper == null) return;
     await _dbHelper!.removeSongFromPlaylist(playlistId, songId);
+    _playlists = await _dbHelper!.getPlaylists();
     notifyListeners();
-    _syncService?.syncUp();
   }
 
   Future<void> replacePlaylistSongs(String playlistId, List<dynamic> songs) async {
     if (_dbHelper == null) return;
     await _dbHelper!.replacePlaylistSongs(playlistId, songs);
+    _playlists = await _dbHelper!.getPlaylists();
     notifyListeners();
-    _syncService?.syncUp();
   }
 
   Future<List<dynamic>> getPlaylistSongs(String playlistId) async {
@@ -198,6 +199,18 @@ class LibraryProvider extends ChangeNotifier {
       } catch (e) {}
     }
     return totalSize;
+  }
+
+  Future<void> importDatabase(String sourcePath) async {
+    if (_dbHelper == null) return;
+    await _dbHelper!.importDatabase(sourcePath);
+    await loadLibrary();
+  }
+
+  Future<void> mergeDatabase(String sourcePath) async {
+    if (_dbHelper == null) return;
+    await _dbHelper!.mergeDatabase(sourcePath);
+    await loadLibrary();
   }
 
   Future<void> clearCache() async {

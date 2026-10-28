@@ -12,6 +12,10 @@
 .swiftpm/
 migrate_working_dir/
 
+# Scratch and debug files
+db_helper_git.txt
+test_*.dart
+
 # IntelliJ related
 *.iml
 *.ipr

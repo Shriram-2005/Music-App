@@ -12,6 +12,7 @@ import '../theme/app_theme.dart';
 import '../providers/settings_provider.dart';
 import 'settings_screen.dart';
 import 'search_screen.dart';
+import 'artist_screen.dart';
 import '../widgets/song_options_menu.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -88,6 +89,29 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  void _refreshDailyMix([LibraryProvider? providedProvider]) {
+    final libraryProvider = providedProvider ?? context.read<LibraryProvider>();
+    final playlists = libraryProvider.playlists;
+    
+    List<dynamic> allCustomSongs = [];
+    for (var p in playlists) {
+      allCustomSongs.addAll(p['songs'] ?? []);
+    }
+    
+    final Map<String, dynamic> uniqueMap = {};
+    for (var s in allCustomSongs) {
+      uniqueMap[s['id'].toString()] = s;
+    }
+    
+    setState(() {
+      _dailyMixSongs = uniqueMap.values.toList();
+      _dailyMixSongs.shuffle();
+      if (_dailyMixSongs.length > _dailyMixLimit) {
+        _dailyMixSongs = _dailyMixSongs.sublist(0, _dailyMixLimit);
+      }
+    });
+  }
+
   Future<void> _loadInitialData() async {
     setState(() {
       _isLoading = true;
@@ -99,20 +123,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final liked = libraryProvider.likedSongs;
     
     // Build Daily Mix
-    List<dynamic> allCustomSongs = [];
-    for (var p in playlists) {
-      allCustomSongs.addAll(p['songs'] ?? []);
-    }
-    // Deduplicate and shuffle
-    final Map<String, dynamic> uniqueMap = {};
-    for (var s in allCustomSongs) {
-      uniqueMap[s['id'].toString()] = s;
-    }
-    _dailyMixSongs = uniqueMap.values.toList();
-    _dailyMixSongs.shuffle();
-    if (_dailyMixSongs.length > _dailyMixLimit) {
-      _dailyMixSongs = _dailyMixSongs.sublist(0, _dailyMixLimit);
-    }
+    _refreshDailyMix(libraryProvider);
 
     // Determine tailored queries based on liked/recent
     final random = Random();
@@ -288,6 +299,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
                     _buildSectionTitle(_searchController.text.isEmpty ? 'Recommended for You' : 'Search Results'),
                     if (_searchController.text.isEmpty) _buildLanguageChips(),
+                    if (_selectedLanguage != 'All' && _searchController.text.isEmpty)
+                      _buildArtistPills(),
                     _buildVerticalList(audioProvider, libraryProvider),
                     if (_isLoadingMore)
                       const SliverToBoxAdapter(
@@ -363,8 +376,16 @@ class _HomeScreenState extends State<HomeScreen> {
                             'Daily Mix',
                             style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold),
                           ),
-                          PopupMenuButton<int>(
-                            icon: ClipRRect(
+                          Row(
+                            children: [
+                              IconButton(
+                                icon: const Icon(Icons.refresh, color: Colors.white),
+                                onPressed: () {
+                                  _refreshDailyMix(libraryProvider);
+                                },
+                              ),
+                              PopupMenuButton<int>(
+                                icon: ClipRRect(
                               borderRadius: BorderRadius.circular(12),
                               child: BackdropFilter(
                                 filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
@@ -386,12 +407,14 @@ class _HomeScreenState extends State<HomeScreen> {
                               setState(() {
                                 _dailyMixLimit = value;
                               });
-                              _loadInitialData(); // reload mix
+                              _refreshDailyMix(libraryProvider);
                             },
                             itemBuilder: (context) => [
                               const PopupMenuItem(value: 10, child: Text('Top 10', style: TextStyle(color: Colors.white))),
                               const PopupMenuItem(value: 25, child: Text('Top 25', style: TextStyle(color: Colors.white))),
                               const PopupMenuItem(value: 50, child: Text('Top 50', style: TextStyle(color: Colors.white))),
+                            ],
+                          ),
                             ],
                           ),
                         ],
@@ -878,6 +901,85 @@ class _HomeScreenState extends State<HomeScreen> {
           );
         },
         childCount: _recommendedSongs.length,
+      ),
+    );
+  }
+
+  Widget _buildArtistPills() {
+    if (_recommendedSongs.isEmpty) return const SliverToBoxAdapter(child: SizedBox());
+
+    final Set<String> artistsSet = {};
+    for (var song in _recommendedSongs) {
+      final artistList = song['primaryArtists']?.toString().split(',') ?? [];
+      for (var a in artistList) {
+        if (a.trim().isNotEmpty) {
+          artistsSet.add(a.trim());
+        }
+      }
+    }
+
+    final artists = artistsSet.toList();
+    if (artists.isEmpty) return const SliverToBoxAdapter(child: SizedBox());
+
+    return SliverToBoxAdapter(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 10, 20, 10),
+            child: Text(
+              'Artists',
+              style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+          ),
+          SizedBox(
+            height: 100, // increased height for squircle
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              physics: const BouncingScrollPhysics(),
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              itemCount: artists.length,
+              itemBuilder: (context, index) {
+                final artist = artists[index];
+                return Padding(
+                  padding: const EdgeInsets.only(right: 12),
+                  child: GestureDetector(
+                    onTap: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => ArtistScreen(artistName: artist),
+                        ),
+                      );
+                    },
+                    child: Container(
+                      width: 100,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(28),
+                        border: Border.all(color: Colors.white.withOpacity(0.05)),
+                      ),
+                      alignment: Alignment.center,
+                      padding: const EdgeInsets.all(8),
+                      child: Text(
+                        artist,
+                        textAlign: TextAlign.center,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 10),
+        ],
       ),
     );
   }

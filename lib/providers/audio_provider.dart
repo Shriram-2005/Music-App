@@ -19,6 +19,7 @@ class AudioProvider extends ChangeNotifier {
   int _currentIndex = 0;
   bool _isLoading = false;
   String _currentQuality = '320 kbps';
+  String? _queueTag;
   
   ConcatenatingAudioSource? _playlist;
   bool _isPreloading = false;
@@ -36,10 +37,24 @@ class AudioProvider extends ChangeNotifier {
   bool get isLoading => _isLoading;
   String get currentQuality => _currentQuality;
   Color? get dominantColor => _dominantColor;
+  String? get queueTag => _queueTag;
 
-  dynamic get currentSong => (_currentIndex >= 0 && _currentIndex < _queue.length) 
-      ? _queue[_currentIndex] 
-      : null;
+  dynamic get currentSong {
+    // 1. Prioritize the exact audio source playing in hardware
+    final currentSource = _player.sequenceState?.currentSource;
+    final currentItem = currentSource?.tag;
+    if (currentItem is MediaItem && currentItem.id.isNotEmpty) {
+      final activeIndex = _queue.indexWhere((s) => s['id']?.toString() == currentItem.id);
+      if (activeIndex != -1) {
+        return _queue[activeIndex];
+      }
+    }
+    // 2. Fallback to _currentIndex
+    if (_currentIndex >= 0 && _currentIndex < _queue.length) {
+      return _queue[_currentIndex];
+    }
+    return null;
+  }
 
   AudioProvider(this._userId) {
     _player = AudioPlayer();
@@ -51,12 +66,41 @@ class AudioProvider extends ChangeNotifier {
 
     _init();
     
-    _player.currentIndexStream.listen((index) {
-      if (index != null && index > 0 && _playlist != null) {
-        // Advanced to preloaded song (e.g. from Lock Screen Next button or auto-play)
-        if (_currentIndex + 1 < _queue.length) {
-          _currentIndex++;
+    // Bind directly to the audio engine's playing track sequence
+    _player.sequenceStateStream.listen((sequenceState) async {
+      final currentSource = sequenceState?.currentSource;
+      if (currentSource == null) return;
+      
+      final tag = currentSource.tag;
+      if (tag is MediaItem && tag.id.isNotEmpty) {
+        final playingSongId = tag.id;
+        final playingIndex = _queue.indexWhere((s) => s['id']?.toString() == playingSongId);
+        
+        if (playingIndex != -1 && playingIndex != _currentIndex) {
+          _currentIndex = playingIndex;
+          final playingSong = _queue[_currentIndex];
+          final artUrl = _getHighResImage(playingSong['image']);
+          _updateDominantColor(artUrl);
+          
+          if (_dbHelper != null) {
+            _dbHelper!.addRecentlyPlayed(playingSong);
+          }
+          try {
+            final prefs = await SharedPreferences.getInstance();
+            await prefs.setString('saved_current_song', jsonEncode(playingSong));
+          } catch (_) {}
+          
           notifyListeners();
+
+          // Prune the previous track once player transitions to the next source
+          if (_playlist != null && _playlist!.length > 1 && (sequenceState.currentIndex ?? 0) > 0) {
+            try {
+              await _playlist!.removeAt(0);
+            } catch (e) {
+              print('Error pruning previous audio source: $e');
+            }
+          }
+          
           _preloadNextSong();
         }
       }
@@ -67,8 +111,7 @@ class AudioProvider extends ChangeNotifier {
         if (_player.loopMode == LoopMode.one) {
           seek(Duration.zero);
           _player.play();
-        } else if (_playlist == null || _playlist!.length <= 1) {
-          // Fallback if preloading failed
+        } else {
           playNext();
         }
       }
@@ -96,15 +139,26 @@ class AudioProvider extends ChangeNotifier {
     }
   }
 
-  String _getHighResImage(List<dynamic>? imageUrls) {
-    if (imageUrls == null || imageUrls.isEmpty) return '';
-    try {
-      final url = imageUrls[0]['url'];
-      return url?.toString() ?? '';
-    } catch (e) {
-      print('Error parsing metadata: $e');
-      return '';
+  String _getHighResImage(dynamic image) {
+    if (image == null) return '';
+    if (image is String) return image;
+    if (image is List && image.isNotEmpty) {
+      try {
+        final last = image.last;
+        if (last is Map && last['url'] != null) {
+          return last['url'].toString();
+        } else if (last is String) {
+          return last;
+        }
+        final first = image[0];
+        if (first is Map && first['url'] != null) {
+          return first['url'].toString();
+        }
+      } catch (e) {
+        return '';
+      }
     }
+    return '';
   }
 
   Future<void> _init() async {
@@ -139,37 +193,61 @@ class AudioProvider extends ChangeNotifier {
     }
   }
 
-  Future<void> playSong(dynamic song, {List<dynamic>? newQueue}) async {
+  Future<void> playSong(dynamic song, {List<dynamic>? newQueue, int? initialIndex, String? queueTag}) async {
     if (newQueue != null && newQueue.isNotEmpty) {
-      _queue = newQueue;
-      _currentIndex = _queue.indexWhere((s) => s['id'] == song['id']);
-      if (_currentIndex == -1) _currentIndex = 0;
+      _queue = List<dynamic>.from(newQueue);
+      if (initialIndex != null && initialIndex >= 0 && initialIndex < _queue.length) {
+        _currentIndex = initialIndex;
+      } else {
+        _currentIndex = _queue.indexWhere((s) => s['id']?.toString() == song['id']?.toString());
+        if (_currentIndex == -1) _currentIndex = 0;
+      }
+      _queueTag = queueTag;
     } else if (newQueue == null && _queue.isEmpty) {
       _queue = [song];
       _currentIndex = 0;
+      _queueTag = queueTag;
     } else if (newQueue == null) {
-      _currentIndex = _queue.indexWhere((s) => s['id'] == song['id']);
-      if (_currentIndex == -1) {
-         _queue = [song];
-         _currentIndex = 0;
+      if (initialIndex != null && initialIndex >= 0 && initialIndex < _queue.length) {
+        _currentIndex = initialIndex;
+      } else {
+        final found = _queue.indexWhere((s) => s['id']?.toString() == song['id']?.toString());
+        if (found != -1) {
+          _currentIndex = found;
+        } else {
+          _queue = [song];
+          _currentIndex = 0;
+        }
       }
     }
 
     await _playCurrentIndex();
   }
 
-  void updateQueue(List<dynamic> newQueue) {
+  void updateQueue(List<dynamic> newQueue, {String? queueTag}) {
     if (_queue.isEmpty || _currentIndex < 0 || _currentIndex >= _queue.length) return;
+    if (queueTag != null && _queueTag != null && queueTag != _queueTag) return;
     
-    final playingSongId = _queue[_currentIndex]['id'].toString();
-    _queue = newQueue;
+    final playingSongId = _queue[_currentIndex]['id']?.toString();
+    _queue = List<dynamic>.from(newQueue);
     
-    final newIndex = _queue.indexWhere((s) => s['id'].toString() == playingSongId);
-    if (newIndex != -1) {
-      _currentIndex = newIndex;
-      _rebuildPreload();
+    if (playingSongId != null) {
+      final newIndex = _queue.indexWhere((s) => s['id']?.toString() == playingSongId);
+      if (newIndex != -1) {
+        _currentIndex = newIndex;
+        _rebuildPreload();
+      }
     }
     notifyListeners();
+  }
+
+  void addToQueue(dynamic song) {
+    final songId = song['id']?.toString();
+    if (songId != null && !_queue.any((s) => s['id']?.toString() == songId)) {
+      _queue.add(song);
+      _rebuildPreload();
+      notifyListeners();
+    }
   }
 
   void reorderQueue(int oldIndex, int newIndex) {
@@ -194,24 +272,42 @@ class AudioProvider extends ChangeNotifier {
 
   Future<void> _rebuildPreload() async {
     if (_playlist != null && _playlist!.length > 1) {
-      await _playlist!.removeAt(1);
+      try {
+        await _playlist!.removeAt(1);
+      } catch (e) {
+        print('Error rebuilding preload: $e');
+      }
     }
     _isPreloading = false;
     _preloadNextSong();
   }
 
   Future<String?> _getAudioUrlForSong(dynamic song) async {
-    final songId = song['id'].toString();
-    String? localPath;
+    final songId = song['id']?.toString() ?? '';
+    if (songId.isEmpty) return null;
+
+    // 1. Direct local file in song payload
+    final songLocalPath = song['localPath']?.toString();
+    if (songLocalPath != null && songLocalPath.isNotEmpty) {
+      final file = File(songLocalPath);
+      if (await file.exists()) {
+        return Uri.file(file.path).toString();
+      }
+    }
+
+    // 2. Downloaded song in local SQLite DB
     if (_dbHelper != null) {
-      localPath = await _dbHelper!.getDownloadPath(songId);
+      final localPath = await _dbHelper!.getDownloadPath(songId);
+      if (localPath != null && localPath.isNotEmpty) {
+        final file = File(localPath);
+        if (await file.exists()) {
+          return Uri.file(file.path).toString();
+        }
+      }
     }
     
-    if (localPath != null && await File(localPath).exists()) {
-        return 'file://$localPath';
-    } else {
-        return await ApiService.getAudioUrl(songId);
-    }
+    // 3. Online stream resolution
+    return await ApiService.getAudioUrl(songId);
   }
 
   Future<void> _playCurrentIndex() async {
@@ -222,11 +318,21 @@ class AudioProvider extends ChangeNotifier {
 
     try {
       final song = _queue[_currentIndex];
-      final songId = song['id'].toString();
+      final songId = song['id']?.toString() ?? '';
 
       final audioUrl = await _getAudioUrlForSong(song);
       if (audioUrl == null || audioUrl.isEmpty) {
-        print('Audio URL is empty! Cannot play.');
+        print('Audio URL is empty for song: ${song['name']} (id: $songId)');
+        // Auto-skip to next playable track if queue has multiple songs
+        if (_queue.length > 1) {
+          if (_currentIndex + 1 < _queue.length) {
+            _currentIndex++;
+            await _playCurrentIndex();
+          } else if (_player.loopMode == LoopMode.all) {
+            _currentIndex = 0;
+            await _playCurrentIndex();
+          }
+        }
         return;
       }
 
@@ -246,7 +352,7 @@ class AudioProvider extends ChangeNotifier {
       _updateDominantColor(artUrl);
       
       final mediaItem = MediaItem(
-        id: song['id'].toString(),
+        id: songId,
         album: song['album']?['name']?.toString() ?? '',
         title: song['name']?.toString() ?? 'Unknown',
         artist: song['primaryArtists']?.toString() ?? 'Unknown',
@@ -262,15 +368,22 @@ class AudioProvider extends ChangeNotifier {
       
       _preloadNextSong();
       
-      if (song != null && _dbHelper != null) {
+      if (_dbHelper != null) {
         _dbHelper!.addRecentlyPlayed(song);
       }
       
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('saved_current_song', jsonEncode(song));
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('saved_current_song', jsonEncode(song));
+      } catch (_) {}
       
     } catch (e) {
       print('Error playing audio: $e');
+      // If error occurs, try skipping to next track
+      if (_queue.length > 1 && _currentIndex + 1 < _queue.length) {
+        _currentIndex++;
+        _playCurrentIndex();
+      }
     } finally {
       _isLoading = false;
       notifyListeners();
@@ -300,31 +413,22 @@ class AudioProvider extends ChangeNotifier {
     _isPreloading = true;
     try {
       final nextSong = _queue[_currentIndex + 1];
-      final songId = nextSong['id'].toString();
-
-      String? audioUrl;
-      String? localPath;
-      if (_dbHelper != null) {
-        localPath = await _dbHelper!.getDownloadPath(songId);
-      }
+      final audioUrl = await _getAudioUrlForSong(nextSong);
       
-      if (localPath != null && await _dbHelper!.getDownloadPath(songId).then((_) => true)) {
-          audioUrl = 'file://$localPath';
-      } else {
-          audioUrl = await ApiService.getAudioUrl(songId);
-      }
-      
-      if (audioUrl.isNotEmpty && _playlist != null) {
-        final artUrl = _getHighResImage(nextSong['image']);
-        final mediaItem = MediaItem(
-          id: nextSong['id'].toString(),
-          album: nextSong['album']?['name']?.toString() ?? '',
-          title: nextSong['name']?.toString() ?? 'Unknown',
-          artist: nextSong['primaryArtists']?.toString() ?? 'Unknown',
-          artUri: artUrl.isNotEmpty ? Uri.parse(artUrl) : null,
-        );
-        AudioSource nextSource = AudioSource.uri(Uri.parse(audioUrl), tag: mediaItem);
-        await _playlist!.add(nextSource);
+      if (audioUrl != null && audioUrl.isNotEmpty && _playlist != null) {
+        // Only preload if we haven't already attached the next track
+        if (_playlist!.length == 1) {
+          final artUrl = _getHighResImage(nextSong['image']);
+          final mediaItem = MediaItem(
+            id: nextSong['id']?.toString() ?? '',
+            album: nextSong['album']?['name']?.toString() ?? '',
+            title: nextSong['name']?.toString() ?? 'Unknown',
+            artist: nextSong['primaryArtists']?.toString() ?? 'Unknown',
+            artUri: artUrl.isNotEmpty ? Uri.parse(artUrl) : null,
+          );
+          AudioSource nextSource = AudioSource.uri(Uri.parse(audioUrl), tag: mediaItem);
+          await _playlist!.add(nextSource);
+        }
       }
     } catch (e) {
       print('Failed to preload next song: $e');
@@ -350,6 +454,17 @@ class AudioProvider extends ChangeNotifier {
 
   Future<void> smoothPlay() async {
     _fadeTimer?.cancel();
+    
+    // Workaround for stream timeouts when resuming: seek to current position
+    if (!_player.playing) {
+      try {
+        final currentPos = _player.position;
+        await _player.seek(currentPos);
+      } catch (e) {
+        print('Error seeking to fix timeout: $e');
+      }
+    }
+
     await _player.play();
     double vol = _player.volume;
     if (vol == 0.0) vol = 0.1;
@@ -391,6 +506,7 @@ class AudioProvider extends ChangeNotifier {
   }
 
   Future<void> playNext() async {
+    if (_queue.isEmpty) return;
     final prefs = await SharedPreferences.getInstance();
     final bool crossfade = prefs.getBool('crossfadeEnabled') ?? false;
     final int duration = prefs.getInt('crossfadeDuration') ?? 3;
@@ -398,15 +514,25 @@ class AudioProvider extends ChangeNotifier {
     if (crossfade && _player.playing) {
       await _crossfadeToNext(duration);
     } else {
-      _currentIndex++;
-      if (_currentIndex >= _queue.length) _currentIndex = 0;
-      await _playCurrentIndex();
+      if (_currentIndex + 1 < _queue.length) {
+        _currentIndex++;
+        await _playCurrentIndex();
+      } else if (_player.loopMode == LoopMode.all) {
+        _currentIndex = 0;
+        await _playCurrentIndex();
+      }
     }
   }
 
   Future<void> _crossfadeToNext(int durationSeconds) async {
-    _currentIndex++;
-    if (_currentIndex >= _queue.length) _currentIndex = 0;
+    if (_queue.isEmpty) return;
+    if (_currentIndex + 1 < _queue.length) {
+      _currentIndex++;
+    } else if (_player.loopMode == LoopMode.all) {
+      _currentIndex = 0;
+    } else {
+      return;
+    }
     
     // Copy current state to Player B to fade out
     try {
@@ -441,9 +567,19 @@ class AudioProvider extends ChangeNotifier {
 
   Future<void> playPrevious() async {
     if (_queue.isEmpty) return;
-    _currentIndex = (_currentIndex - 1) % _queue.length;
-    if (_currentIndex < 0) _currentIndex = _queue.length - 1;
-    _playCurrentIndex();
+    if (_player.position.inSeconds > 3) {
+      seek(Duration.zero);
+      return;
+    }
+    if (_currentIndex - 1 >= 0) {
+      _currentIndex--;
+    } else if (_player.loopMode == LoopMode.all) {
+      _currentIndex = _queue.length - 1;
+    } else {
+      seek(Duration.zero);
+      return;
+    }
+    await _playCurrentIndex();
   }
 
   void seek(Duration position) {

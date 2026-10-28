@@ -1,6 +1,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:file_picker/file_picker.dart';
 
 import '../providers/library_provider.dart';
 import '../providers/settings_provider.dart';
@@ -304,10 +305,103 @@ class SettingsScreen extends StatelessWidget {
               subtitle: const Text('Dynamic based on album art (Default)', style: TextStyle(color: Colors.white54)),
             ),
 
+            _buildSectionHeader('Data Backup & Restore'),
+            ListTile(
+              leading: const Icon(Icons.download, color: Colors.white70),
+              title: const Text('Export Database', style: TextStyle(color: Colors.white)),
+              subtitle: const Text('Backup your playlists, liked songs, and history', style: TextStyle(color: Colors.white54)),
+              onTap: () async {
+                final dbHelper = libraryProvider.dbHelper;
+                if (dbHelper == null) return;
+                try {
+                  final bytes = await dbHelper.getDatabaseBytes();
+                  String? outputFile = await FilePicker.saveFile(
+                    dialogTitle: 'Save Database Backup',
+                    fileName: 'ausram_music_backup.db',
+                    bytes: bytes,
+                  );
+                  if (outputFile != null && context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Database exported to: $outputFile')));
+                  }
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to export: $e')));
+                  }
+                }
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.upload, color: Colors.white70),
+              title: const Text('Import Database', style: TextStyle(color: Colors.white)),
+              subtitle: const Text('Restore from a previous backup file', style: TextStyle(color: Colors.white54)),
+              onTap: () async {
+                try {
+                  FilePickerResult? result = await FilePicker.pickFiles(
+                    type: FileType.any,
+                  );
+                  if (result != null && result.files.single.path != null) {
+                    final sourcePath = result.files.single.path!;
+                    final lowerPath = sourcePath.toLowerCase();
+                    if (!lowerPath.contains('.db')) {
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select a valid .db backup file')));
+                      }
+                      return;
+                    }
+
+                    if (!context.mounted) return;
+                    showDialog(
+                      context: context,
+                      builder: (dialogCtx) => AlertDialog(
+                        backgroundColor: Colors.grey[900],
+                        title: const Text('Restore Database', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                        content: const Text(
+                          'How would you like to restore this backup?\n\n'
+                          '• Merge: Keeps your current playlists and adds any missing playlists and songs from the backup.\n\n'
+                          '• Replace: Completely replaces your library with the backup.',
+                          style: TextStyle(color: Colors.white70),
+                        ),
+                        actions: [
+                          TextButton(
+                            onPressed: () => Navigator.pop(dialogCtx),
+                            child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
+                          ),
+                          TextButton(
+                            onPressed: () async {
+                              Navigator.pop(dialogCtx);
+                              await libraryProvider.mergeDatabase(sourcePath);
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Database merged successfully!')));
+                              }
+                            },
+                            child: const Text('MERGE (RECOMMENDED)', style: TextStyle(color: AppTheme.primary, fontWeight: FontWeight.bold)),
+                          ),
+                          TextButton(
+                            onPressed: () async {
+                              Navigator.pop(dialogCtx);
+                              await libraryProvider.importDatabase(sourcePath);
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Database replaced successfully!')));
+                              }
+                            },
+                            child: const Text('REPLACE', style: TextStyle(color: Colors.redAccent)),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+                } catch (e) {
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to import: $e')));
+                  }
+                }
+              },
+            ),
+
             _buildSectionHeader('About'),
             const ListTile(
               leading: Icon(Icons.info_outline, color: Colors.white70),
-              title: Text('Aura Music Version', style: TextStyle(color: Colors.white)),
+              title: Text('AUSRAM Music Version', style: TextStyle(color: Colors.white)),
               subtitle: Text('1.0.0-final', style: TextStyle(color: Colors.white54)),
             ),
             

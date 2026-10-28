@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 
@@ -16,11 +18,51 @@ class DbHelper {
 
   Future<Database> _initDb() async {
     final dbPath = await getDatabasesPath();
-    final path = join(dbPath, 'aura_music_$userId.db');
+
+    final newPath = join(dbPath, 'ausram_music_$userId.db');
+    final oldPath = join(dbPath, 'aura_music_$userId.db');
+    final oldPathV2 = join(dbPath, 'aura_music_v2_$userId.db'); // Wait, let's also check this just in case!
+
+    // Migrate old db if it exists and new DB doesn't exist yet
+    final oldFile = File(oldPath);
+    final oldFileV2 = File(oldPathV2);
+    final newFile = File(newPath);
+    
+    if (!await newFile.exists() || (await newFile.length()) == 0) {
+      if (await oldFile.exists()) {
+        await oldFile.copy(newPath);
+      } else if (await oldFileV2.exists()) {
+        await oldFileV2.copy(newPath);
+      }
+    }
+
+    // Safely mark old files as migrated so they never interfere again
+    if (await oldFile.exists()) {
+      try {
+        await oldFile.rename('$oldPath.migrated');
+      } catch (_) {}
+    }
+    if (await oldFileV2.exists()) {
+      try {
+        await oldFileV2.rename('$oldPathV2.migrated');
+      } catch (_) {}
+    }
 
     return await openDatabase(
-      path,
-      version: 4,
+      newPath,
+      version: 5,
+      onOpen: (db) async {
+        try {
+          await db.execute('ALTER TABLE playlists ADD COLUMN orderIndex INTEGER DEFAULT 0');
+        } catch (_) {}
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS recent_searches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            query TEXT UNIQUE,
+            timestamp INTEGER
+          )
+        ''');
+      },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
           await db.execute('''
@@ -182,6 +224,114 @@ class DbHelper {
     final db = await database;
     await db.delete('recently_played');
     await db.delete('playlist_songs');
+    await db.delete('recent_searches');
+  }
+
+  Future<void> exportDatabase(String targetPath) async {
+    final dbPath = await getDatabasesPath();
+    final path = join(dbPath, 'ausram_music_$userId.db');
+    final sourceFile = File(path);
+    if (await sourceFile.exists()) {
+      await sourceFile.copy(targetPath);
+    } else {
+      throw Exception('Database file not found');
+    }
+  }
+
+  Future<Uint8List> getDatabaseBytes() async {
+    final dbPath = await getDatabasesPath();
+    final path = join(dbPath, 'ausram_music_$userId.db');
+    final sourceFile = File(path);
+    if (await sourceFile.exists()) {
+      return await sourceFile.readAsBytes();
+    } else {
+      throw Exception('Database file not found');
+    }
+  }
+
+  Future<void> importDatabase(String sourcePath) async {
+    final dbPath = await getDatabasesPath();
+    final path = join(dbPath, 'ausram_music_$userId.db');
+    final sourceFile = File(sourcePath);
+    if (await sourceFile.exists()) {
+      if (_db != null) {
+        await _db!.close();
+        _db = null;
+      }
+      await sourceFile.copy(path);
+      _db = await _initDb();
+    } else {
+      throw Exception('Backup file not found');
+    }
+  }
+
+  Future<void> mergeDatabase(String sourcePath) async {
+    final sourceFile = File(sourcePath);
+    if (!await sourceFile.exists()) {
+      throw Exception('Backup file not found');
+    }
+
+    final backupDb = await openDatabase(sourcePath, readOnly: true);
+    final targetDb = await database;
+
+    try {
+      // 1. Merge liked songs
+      final bakLiked = await backupDb.query('liked_songs');
+      for (var row in bakLiked) {
+        await targetDb.insert('liked_songs', row, conflictAlgorithm: ConflictAlgorithm.ignore);
+      }
+
+      // 2. Fetch target playlists and map by lowercase name
+      final currentPlaylists = await targetDb.query('playlists');
+      final Map<String, String> plByName = {};
+      for (var p in currentPlaylists) {
+        final name = (p['name']?.toString() ?? '').trim().toLowerCase();
+        if (name.isNotEmpty) {
+          plByName[name] = p['id'].toString();
+        }
+      }
+
+      // 3. Fetch backup playlists
+      final bakPlaylists = await backupDb.query('playlists');
+      for (var bp in bakPlaylists) {
+        final bName = bp['name']?.toString() ?? 'Playlist';
+        final normName = bName.trim().toLowerCase();
+        String targetPlId;
+
+        if (plByName.containsKey(normName)) {
+          targetPlId = plByName[normName]!;
+        } else {
+          // Insert playlist
+          targetPlId = bp['id'].toString();
+          await targetDb.insert('playlists', {
+            'id': targetPlId,
+            'name': bName,
+            'image': bp['image'] ?? '',
+          }, conflictAlgorithm: ConflictAlgorithm.replace);
+          plByName[normName] = targetPlId;
+        }
+
+        // Get existing songs in target playlist
+        final existingRows = await targetDb.query('playlist_songs', columns: ['songId'], where: 'playlistId = ?', whereArgs: [targetPlId]);
+        final existingSongIds = existingRows.map((r) => r['songId'].toString()).toSet();
+
+        // Get backup songs for this playlist
+        final bakSongs = await backupDb.query('playlist_songs', where: 'playlistId = ?', whereArgs: [bp['id'].toString()]);
+        for (var sRow in bakSongs) {
+          final sId = sRow['songId']?.toString();
+          if (sId != null && !existingSongIds.contains(sId)) {
+            await targetDb.insert('playlist_songs', {
+              'playlistId': targetPlId,
+              'songId': sId,
+              'songData': sRow['songData'],
+            });
+            existingSongIds.add(sId);
+          }
+        }
+      }
+    } finally {
+      await backupDb.close();
+    }
   }
 
   // --- Liked Songs --- //
@@ -212,19 +362,36 @@ class DbHelper {
   Future<List<dynamic>> getLikedSongs() async {
     final db = await database;
     final results = await db.query('liked_songs');
-    return results.map((row) => jsonDecode(row['songData'] as String)).toList();
+    List<dynamic> songs = [];
+    for (var row in results) {
+      try {
+        final rawData = row['songData'];
+        if (rawData != null && rawData is String && rawData.isNotEmpty) {
+          final decoded = jsonDecode(rawData);
+          if (decoded != null) {
+            songs.add(decoded);
+          }
+        }
+      } catch (e) {
+        print('Error decoding liked song row: $e');
+      }
+    }
+    return songs;
   }
 
   // --- Playlists --- //
   
-  Future<void> createPlaylist(String name) async {
+  Future<String> createPlaylist(String name) async {
     final db = await database;
     final id = DateTime.now().millisecondsSinceEpoch.toString();
+    final count = Sqflite.firstIntValue(await db.rawQuery('SELECT COUNT(*) FROM playlists')) ?? 0;
     await db.insert('playlists', {
       'id': id,
       'name': name,
       'image': '',
+      'orderIndex': count,
     });
+    return id;
   }
 
   Future<void> renamePlaylist(String id, String newName) async {
@@ -237,16 +404,45 @@ class DbHelper {
     );
   }
 
+  Future<void> reorderPlaylists(List<String> orderedIds) async {
+    final db = await database;
+    await db.transaction((txn) async {
+      for (int i = 0; i < orderedIds.length; i++) {
+        await txn.update(
+          'playlists',
+          {'orderIndex': i},
+          where: 'id = ?',
+          whereArgs: [orderedIds[i]],
+        );
+      }
+    });
+  }
+
   Future<List<Map<String, dynamic>>> getPlaylists() async {
     final db = await database;
-    final playlists = await db.query('playlists');
+    List<Map<String, dynamic>> playlists;
+    try {
+      playlists = await db.query('playlists', orderBy: 'orderIndex ASC, rowid ASC');
+    } catch (_) {
+      playlists = await db.query('playlists', orderBy: 'rowid ASC');
+    }
     
     List<Map<String, dynamic>> enrichedPlaylists = [];
     for (var p in playlists) {
-      final pSongs = await getPlaylistSongs(p['id'] as String);
-      final enriched = Map<String, dynamic>.from(p);
-      enriched['songs'] = pSongs;
-      enrichedPlaylists.add(enriched);
+      final pId = p['id'].toString();
+      try {
+        final pSongs = await getPlaylistSongs(pId);
+        final enriched = Map<String, dynamic>.from(p);
+        enriched['id'] = pId;
+        enriched['songs'] = pSongs;
+        enrichedPlaylists.add(enriched);
+      } catch (e) {
+        print('Error loading playlist $pId: $e');
+        final enriched = Map<String, dynamic>.from(p);
+        enriched['id'] = pId;
+        enriched['songs'] = [];
+        enrichedPlaylists.add(enriched);
+      }
     }
     return enrichedPlaylists;
   }
@@ -295,39 +491,58 @@ class DbHelper {
 
   Future<List<dynamic>> getPlaylistSongs(String playlistId) async {
     final db = await database;
-    // Ordering by the SQLite innate row ID guarantees insertion array order locally
+    final pIdStr = playlistId.toString();
+    final pIdInt = int.tryParse(pIdStr);
+
     final results = await db.query(
       'playlist_songs', 
-      where: 'playlistId = ?', 
-      whereArgs: [playlistId],
-      orderBy: 'id ASC',
+      where: pIdInt != null ? 'playlistId = ? OR playlistId = ?' : 'playlistId = ?', 
+      whereArgs: pIdInt != null ? [pIdStr, pIdInt] : [pIdStr],
+      orderBy: 'rowid ASC',
     );
-    return results.map((row) => jsonDecode(row['songData'] as String)).toList();
+
+    List<dynamic> songs = [];
+    for (var row in results) {
+      try {
+        final rawData = row['songData'];
+        if (rawData != null && rawData is String && rawData.isNotEmpty) {
+          final decoded = jsonDecode(rawData);
+          if (decoded != null) {
+            songs.add(decoded);
+          }
+        }
+      } catch (e) {
+        print('Error decoding song row in playlist $playlistId: $e');
+      }
+    }
+    return songs;
   }
 
   // --- Recent Searches --- //
 
   Future<void> saveSearch(String query) async {
+    final clean = query.trim();
+    if (clean.isEmpty) return;
     final db = await database;
     // Upsert query
     await db.insert(
       'recent_searches', 
       {
-        'query': query,
+        'query': clean,
         'timestamp': DateTime.now().millisecondsSinceEpoch,
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
 
-    // Enforce max 5
+    // Enforce max 15
     final countSq = Sqflite.firstIntValue(await db.rawQuery('SELECT COUNT(*) FROM recent_searches'));
-    if (countSq != null && countSq > 5) {
+    if (countSq != null && countSq > 15) {
       await db.execute('''
         DELETE FROM recent_searches 
         WHERE id NOT IN (
           SELECT id FROM recent_searches 
           ORDER BY timestamp DESC 
-          LIMIT 5
+          LIMIT 15
         )
       ''');
     }

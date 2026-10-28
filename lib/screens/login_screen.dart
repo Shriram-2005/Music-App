@@ -103,7 +103,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     ),
                     const SizedBox(height: 24),
                     const Text(
-                      'Welcome to Aura',
+                      'Welcome to AUSRAM',
                       textAlign: TextAlign.center,
                       style: TextStyle(
                         fontSize: 32,

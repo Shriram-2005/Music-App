@@ -30,10 +30,9 @@ class PlaylistModal extends StatelessWidget {
             ),
             ListTile(
               leading: const Icon(Icons.add, color: AppTheme.primary),
-              title: const Text('New Playlist', style: TextStyle(color: AppTheme.primary)),
+              title: const Text('New Playlist', style: TextStyle(color: AppTheme.primary, fontWeight: FontWeight.w600)),
               onTap: () {
-                Navigator.pop(context);
-                // Future enhancement: forward to create playlist dialog
+                _showCreateDialog(context, libraryProvider);
               },
             ),
             const Divider(color: Colors.white24),
@@ -49,15 +48,39 @@ class PlaylistModal extends StatelessWidget {
                   itemCount: playlists.length,
                   itemBuilder: (context, index) {
                     final p = playlists[index];
+                    final pSongs = p['songs'] as List<dynamic>? ?? [];
+                    final alreadyAdded = pSongs.any((s) => s['id']?.toString() == song['id']?.toString());
+                    final count = pSongs.length;
+
                     return ListTile(
-                      leading: const Icon(Icons.queue_music, color: Colors.white54),
-                      title: Text(p['name'], style: const TextStyle(color: Colors.white)),
-                      onTap: () {
-                        libraryProvider.addSongToPlaylist(p['id'].toString(), song);
-                        Navigator.pop(context);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Added to ${p['name']}'))
-                        );
+                      leading: Container(
+                        width: 42,
+                        height: 42,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.08),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: const Icon(Icons.queue_music, color: Colors.white70),
+                      ),
+                      title: Text(p['name'] ?? 'Untitled Playlist', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w500)),
+                      subtitle: Text(
+                        '$count ${count == 1 ? 'song' : 'songs'}${alreadyAdded ? ' • Already added' : ''}',
+                        style: TextStyle(color: alreadyAdded ? AppTheme.primary : Colors.white54, fontSize: 12),
+                      ),
+                      trailing: alreadyAdded
+                          ? const Icon(Icons.check_circle, color: AppTheme.primary, size: 20)
+                          : const Icon(Icons.add_circle_outline, color: Colors.white38, size: 20),
+                      onTap: () async {
+                        await libraryProvider.addSongToPlaylist(p['id'].toString(), song);
+                        if (context.mounted) {
+                          Navigator.pop(context);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Added "${song['name'] ?? 'Song'}" to ${p['name']}'),
+                              backgroundColor: Colors.grey[900],
+                            ),
+                          );
+                        }
                       },
                     );
                   },
@@ -66,6 +89,56 @@ class PlaylistModal extends StatelessWidget {
           ],
         ),
       ),
+      ),
+    );
+  }
+
+  void _showCreateDialog(BuildContext context, LibraryProvider libraryProvider) {
+    final controller = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        backgroundColor: Colors.grey[900],
+        title: const Text('New Playlist', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          style: const TextStyle(color: Colors.white),
+          decoration: const InputDecoration(
+            hintText: 'Playlist name',
+            hintStyle: TextStyle(color: Colors.white54),
+            enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
+            focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: AppTheme.primary)),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx),
+            child: const Text('CANCEL', style: TextStyle(color: Colors.white54)),
+          ),
+          TextButton(
+            onPressed: () async {
+              final name = controller.text.trim();
+              if (name.isNotEmpty) {
+                Navigator.pop(dialogCtx);
+                final newId = await libraryProvider.createPlaylist(name);
+                if (newId != null) {
+                  await libraryProvider.addSongToPlaylist(newId, song);
+                }
+                if (context.mounted) {
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Created "$name" and added "${song['name'] ?? 'Song'}"'),
+                      backgroundColor: Colors.grey[900],
+                    ),
+                  );
+                }
+              }
+            },
+            child: const Text('CREATE & ADD', style: TextStyle(color: AppTheme.primary, fontWeight: FontWeight.bold)),
+          ),
+        ],
       ),
     );
   }

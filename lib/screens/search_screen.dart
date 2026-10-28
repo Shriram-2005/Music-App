@@ -1,4 +1,3 @@
-import 'dart:ui';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -48,30 +47,37 @@ class _SearchScreenState extends State<SearchScreen> {
     super.initState();
     _scrollController.addListener(_onScroll);
     _focusNode.addListener(() {
+      if (_focusNode.hasFocus) {
+        _loadRecents();
+      }
       setState(() {});
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _loadRecents();
-      Future.delayed(const Duration(milliseconds: 100), () {
-        if (mounted) {
-          FocusScope.of(context).requestFocus(_focusNode);
-        }
-      });
     });
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _loadRecents();
   }
 
   Future<void> _loadRecents() async {
     final lib = context.read<LibraryProvider>();
     if (lib.dbHelper != null) {
       final recents = await lib.dbHelper!.getRecentSearches();
-      setState(() {
-        _recentSearches = recents;
-      });
+      if (mounted) {
+        setState(() {
+          _recentSearches = recents;
+        });
+      }
     }
   }
 
-  void _performSearch(String query, {bool dismissKeyboard = true}) async {
-    if (query.trim().isEmpty) {
+  void _performSearch(String query, {bool dismissKeyboard = true, bool saveToRecents = false}) async {
+    final clean = query.trim();
+    if (clean.isEmpty) {
       setState(() => _searchResults = []);
       return;
     }
@@ -85,18 +91,22 @@ class _SearchScreenState extends State<SearchScreen> {
       _searchResults = [];
     });
     
-    final lib = context.read<LibraryProvider>();
-    if (lib.dbHelper != null) {
-      await lib.dbHelper!.saveSearch(query.trim());
-      await _loadRecents();
+    if (saveToRecents) {
+      final lib = context.read<LibraryProvider>();
+      if (lib.dbHelper != null) {
+        await lib.dbHelper!.saveSearch(clean);
+        await _loadRecents();
+      }
     }
     
-    final results = await ApiService.searchSongs(query);
+    final results = await ApiService.searchSongs(clean);
     
-    setState(() {
-      _searchResults = results;
-      _isSearching = false;
-    });
+    if (mounted) {
+      setState(() {
+        _searchResults = results;
+        _isSearching = false;
+      });
+    }
   }
 
   void _clearSearch() {
@@ -185,7 +195,7 @@ class _SearchScreenState extends State<SearchScreen> {
                         borderSide: BorderSide.none,
                       ),
                     ),
-                    onSubmitted: (val) => _performSearch(val, dismissKeyboard: true),
+                    onSubmitted: (val) => _performSearch(val, dismissKeyboard: true, saveToRecents: true),
                     onChanged: (val) {
                       if (val.isEmpty) {
                         _clearSearch();
@@ -194,7 +204,7 @@ class _SearchScreenState extends State<SearchScreen> {
                         if (_debounce?.isActive ?? false) _debounce!.cancel();
                         _debounce = Timer(const Duration(milliseconds: 500), () {
                           if (mounted) {
-                            _performSearch(val, dismissKeyboard: false);
+                            _performSearch(val, dismissKeyboard: false, saveToRecents: false);
                           }
                         });
                       }
@@ -233,7 +243,7 @@ class _SearchScreenState extends State<SearchScreen> {
                                         return GestureDetector(
                                           onTap: () {
                                             _searchController.text = category['name'];
-                                            _performSearch(category['name'], dismissKeyboard: true);
+                                            _performSearch(category['name'], dismissKeyboard: true, saveToRecents: true);
                                           },
                                           child: Container(
                                             decoration: BoxDecoration(
@@ -308,6 +318,11 @@ class _SearchScreenState extends State<SearchScreen> {
                                           onPressed: () => showSongOptionsMenu(context, song),
                                         ),
                                         onTap: () {
+                                          final clean = _searchController.text.trim();
+                                          if (clean.isNotEmpty) {
+                                            final lib = context.read<LibraryProvider>();
+                                            lib.dbHelper?.saveSearch(clean);
+                                          }
                                           audioProvider.playSong(song, newQueue: _searchResults);
                                         },
                                       );
@@ -334,74 +349,7 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
-  Widget _buildCategoryGrid() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Padding(
-          padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
-          child: Text(
-            'Browse all',
-            style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
-          ),
-        ),
-        Expanded(
-          child: GridView.builder(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 120),
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 2,
-              childAspectRatio: 1.5,
-              crossAxisSpacing: 16,
-              mainAxisSpacing: 16,
-            ),
-            itemCount: _categories.length,
-            itemBuilder: (context, index) {
-              final category = _categories[index];
-              return GestureDetector(
-                onTap: () {
-                  final query = '${category['name']} songs';
-                  _searchController.text = query;
-                  _performSearch(query, dismissKeyboard: true);
-                },
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: category['color'],
-                    borderRadius: BorderRadius.circular(12),
-                    boxShadow: [
-                      BoxShadow(color: Colors.black.withOpacity(0.2), blurRadius: 8, offset: const Offset(0, 4)),
-                    ],
-                  ),
-                  child: Stack(
-                    children: [
-                      Positioned(
-                        right: -15,
-                        bottom: -15,
-                        child: Transform.rotate(
-                          angle: 0.4,
-                          child: Icon(Icons.music_note, size: 80, color: Colors.white.withOpacity(0.2)),
-                        ),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.all(16.0),
-                        child: Text(
-                          category['name'],
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            },
-          ),
-        ),
-      ],
-    );
-  }
+
 
   Widget _buildRecentSearches() {
     final settings = context.watch<SettingsProvider>();
@@ -410,51 +358,54 @@ class _SearchScreenState extends State<SearchScreen> {
     }
     
     if (_recentSearches.isEmpty) {
-      return const Center(
-        child: Text(
-          'Play what you love',
-          style: TextStyle(color: Colors.white54, fontSize: 16),
-        ),
-      );
+      return const SizedBox.shrink();
     }
-    return ListView(
-      padding: const EdgeInsets.all(16.0),
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            const Text('Recent searches', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-            TextButton(
-              onPressed: () async {
-                final lib = context.read<LibraryProvider>();
-                if (lib.dbHelper != null) {
-                  await lib.dbHelper!.clearRecentSearches();
-                  _loadRecents();
-                }
-              },
-              child: const Text('Clear', style: TextStyle(color: AppTheme.primary)),
-            )
-          ],
-        ),
-        ..._recentSearches.map((query) => ListTile(
-              leading: const Icon(Icons.history, color: Colors.white70),
-              title: Text(query, style: const TextStyle(color: Colors.white)),
-              trailing: IconButton(
-                icon: const Icon(Icons.close, color: Colors.white54),
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('Recent searches', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
+              TextButton(
                 onPressed: () async {
                   final lib = context.read<LibraryProvider>();
                   if (lib.dbHelper != null) {
-                    await lib.dbHelper!.removeRecentSearch(query);
+                    await lib.dbHelper!.clearRecentSearches();
                     _loadRecents();
                   }
                 },
+                child: const Text('Clear all', style: TextStyle(color: AppTheme.primary, fontWeight: FontWeight.w600)),
               ),
-              onTap: () {
-                _searchController.text = query;
-                _performSearch(query);
-              },
-            )),
-      ],
+            ],
+          ),
+          const SizedBox(height: 4),
+          ..._recentSearches.map((query) => ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.history, color: Colors.white70, size: 22),
+                title: Text(query, style: const TextStyle(color: Colors.white, fontSize: 15)),
+                trailing: IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white54, size: 18),
+                  onPressed: () async {
+                    final lib = context.read<LibraryProvider>();
+                    if (lib.dbHelper != null) {
+                      await lib.dbHelper!.removeRecentSearch(query);
+                      _loadRecents();
+                    }
+                  },
+                ),
+                onTap: () {
+                  _searchController.text = query;
+                  _performSearch(query, dismissKeyboard: true, saveToRecents: true);
+                },
+              )),
+          const SizedBox(height: 12),
+        ],
+      ),
     );
   }
 }

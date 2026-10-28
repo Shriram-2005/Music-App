@@ -155,13 +155,10 @@ void showSongOptionsMenu(BuildContext context, dynamic song) {
                     leading: const Icon(Icons.queue_music, color: Colors.white),
                     title: const Text('Add to Queue', style: TextStyle(color: Colors.white)),
                     onTap: () {
-                      final currentQueue = audioProvider.queue;
-                      if (!currentQueue.any((s) => s['id'] == song['id'])) {
-                        currentQueue.add(song);
-                      }
+                      audioProvider.addToQueue(song);
                       Navigator.pop(context);
                       ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(content: const Text('Added to Queue'), backgroundColor: Colors.grey[900])
+                        SnackBar(content: Text('Added "${song['name'] ?? 'Song'}" to Queue'), backgroundColor: Colors.grey[900])
                       );
                     },
                   ),
